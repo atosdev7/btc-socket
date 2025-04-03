@@ -1,15 +1,19 @@
+import os
 import socket
 import struct
 import mysql.connector
 from datetime import datetime
+from dotenv import load_dotenv
+# Load .env file
+load_dotenv()
 
 # Define the structure sizes based on BTC_SNAP_DATA
 NUMBER_TANKS = 8
 BTC_DATETIME_FORMAT = "6B"  # Year, Month, Date, Hour, Min, Sec
-BTC_TANKSTATE_FORMAT = "B B H f"  # solenoid, maxStatus, maxRTD, tankTemp
+BTC_TANKSTATE_FORMAT = "B H f B B B"  # maxStatus, maxRTD, tankTemp, solenoid, heater, alarm
 BTC_TANKCONFIG_FORMAT = "f f f B"  # tempTarget, pt100Cal, degreePerDay, controlMode
 BTC_SNAP_DATA_FORMAT = (
-    f"@H {BTC_DATETIME_FORMAT} B B B B"  # DeviceID, BTC_DATETIME, pumpStatus, logSnap
+    f"@I {BTC_DATETIME_FORMAT} B B "  # DeviceID (4 bytes), BTC_DATETIME, pumpStatus, logSnap
     f"{NUMBER_TANKS * BTC_TANKSTATE_FORMAT} "  # BTC_TANKSTATE array
     f"{NUMBER_TANKS * BTC_TANKCONFIG_FORMAT} "  # BTC_TANKCONFIG array
     f"{NUMBER_TANKS}I"  # solenoidTime array
@@ -17,12 +21,13 @@ BTC_SNAP_DATA_FORMAT = (
 BTC_SNAP_DATA_SIZE = struct.calcsize(BTC_SNAP_DATA_FORMAT)
 
 # Database connection details
+# Load DB config from .env
 DB_CONFIG = {
-    'host': '127.0.0.1',
-    'port': 3306,
-    'database': 'tank_management',
-    'user': 'tanker',
-    'password': '1234!@#$',
+    'host': os.getenv('DB_HOST'),
+    'port': int(os.getenv('DB_PORT')),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
 }
 
 def datetime_to_string(date_time):
@@ -35,9 +40,9 @@ def datetime_to_string(date_time):
         second=date_time[5]
     ).strftime('%Y-%m-%d %H:%M:%S')
 
-def get_device_id(device_id):
-    """Retrieve device_id from the devices table using board_id."""
-    board_id = f"BTC-{device_id}"
+def get_device_id(board_id):
+    # """Retrieve device_id from the devices table using board_id."""
+    # board_id = f"BTC-{device_id:05d}"
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor()
@@ -45,30 +50,6 @@ def get_device_id(device_id):
         cursor.execute(query, (board_id,))
         result = cursor.fetchone()
         return result[0] if result else None
-    except mysql.connector.Error as err:
-        print(f"Database error: {err}")
-    finally:
-        if conn.is_connected():
-            cursor.close()
-            conn.close()
-def insert_device_if_new(device_id):
-    board_id = f"BTC-{device_id}"
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        # Check if device already exists
-        check_query = "SELECT id FROM devices WHERE board_id = %s"
-        cursor.execute(check_query, (board_id,))
-        device = cursor.fetchone()
-
-        if not device:
-            # Insert new device
-            insert_query = "INSERT INTO devices (board_id, name) VALUES (%s, %s)"
-            cursor.execute(insert_query, (board_id, f"Device {device_id}"))
-            conn.commit()
-            print(f"Inserted new device with board_id: {board_id}")
-
     except mysql.connector.Error as err:
         print(f"Database error: {err}")
     finally:
@@ -135,7 +116,7 @@ def insert_log_and_update_status(device_id, date_time, tank_states, tank_configs
 
         # Insert if no match exists in tank_status
         insert_status_query = (
-            "INSERT INTO tank_statuses (device_id, tank_id, sol_time, current_temp, solenoid, max_rtd, max_status) "
+            "INSERT INTO tank_states (device_id, tank_id, sol_time, current_temp, solenoid, max_rtd, max_status) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON DUPLICATE KEY UPDATE sol_time=VALUES(sol_time), "
             "current_temp=VALUES(current_temp), solenoid=VALUES(solenoid), "
@@ -154,7 +135,7 @@ def insert_log_and_update_status(device_id, date_time, tank_states, tank_configs
         timestamp = datetime_to_string(date_time)
 
         for tank_id, (state, config, sol_time) in enumerate(zip(tank_states, tank_configs, solenoid_times), start=1):
-            solenoid, max_status, max_rtd, tank_temp = state
+            max_status, max_rtd, tank_temp, solenoid, heater, alarm = state
             temp_target, pt100_cal, degree_per_day, control_mode = config
 
             if (tank_temp < 0):
@@ -227,17 +208,20 @@ def handle_client(conn):
                 pump_status = unpacked_data[7]
                 log_snap = unpacked_data[8]
 
+                # Unpack tank states
                 tank_states = [
-                    unpacked_data[11 + i * 4:15 + i * 4]
+                    unpacked_data[9 + i * 6:15 + i * 6]  # Adjusted for 6 fields in BTC_TANKSTATE
                     for i in range(NUMBER_TANKS)
                 ]
 
+                # Unpack tank configs
                 tank_configs = [
-                    unpacked_data[11 + NUMBER_TANKS * 4 + i * 4:15 + NUMBER_TANKS * 4 + i * 4]
+                    unpacked_data[9 + NUMBER_TANKS * 6 + i * 4:13 + NUMBER_TANKS * 6 + i * 4]
                     for i in range(NUMBER_TANKS)
                 ]
 
-                solenoid_times = unpacked_data[11 + NUMBER_TANKS * 8:11 + NUMBER_TANKS * 12]
+                # Unpack solenoid times
+                solenoid_times = unpacked_data[9 + NUMBER_TANKS * 10:9 + NUMBER_TANKS * 14]
 
                 print("Device ID:", board_id)
                 print("Date Time:", datetime_to_string(date_time))
@@ -245,21 +229,20 @@ def handle_client(conn):
                 print("Log Sanp:", log_snap)
 
                 for tank_id, (state, config, sol_time) in enumerate(zip(tank_states, tank_configs, solenoid_times), start=1):
-                    solenoid, max_status, max_rtd, tank_temp = state
+                    max_status, max_rtd, tank_temp, solenoid, heater, alarm = state
                     temp_target, pt100_cal, degree_per_day, control_mode = config
 
-                    print(f"Tank {tank_id}: Solenoid={solenoid}, MaxStatus={max_status}, MaxRTD={max_rtd}, TankTemp={tank_temp}, SolTime={sol_time}")
+                    print(f"Tank {tank_id}: Solenoid={solenoid}, Heater={heater}, Alarm={alarm}, MaxStatus={max_status}, MaxRTD={max_rtd}, TankTemp={tank_temp}, SolTime={sol_time}")
                     print(f"Tank {tank_id} Config: TempTarget={temp_target}, PT100Cal={pt100_cal}, DegreePerDay={degree_per_day}, ControlMode={control_mode}")
 
                 device_id = get_device_id(board_id)
 
-                if not device_id:
+                if device_id:
+                    # Insert and update database
+                    insert_log_and_update_status(device_id, date_time, tank_states, tank_configs, solenoid_times, log_snap)
+                    send_config_updates(conn, device_id)
+                else:
                     print(f"No matching device found for board_id {board_id}")
-                    insert_device_if_new(board_id)
-                    
-                # Insert and update database
-                insert_log_and_update_status(device_id, date_time, tank_states, tank_configs, solenoid_times, log_snap)
-                send_config_updates(conn, device_id)
             else:
                 print(f"Invalid data size: expected {BTC_SNAP_DATA_SIZE}, got {len(data)}")
 
