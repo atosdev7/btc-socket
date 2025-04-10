@@ -1,5 +1,4 @@
 import os
-import socket
 import struct
 import mysql.connector
 from datetime import datetime
@@ -176,22 +175,6 @@ def insert_log_and_update_status(device_id, date_time, tank_states, tank_configs
             cursor.close()
             conn.close()
 
-# Start the TCP socket server
-def start_server():
-    host = '0.0.0.0'
-    port = 9090
-
-    # Create socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind((host, port))
-        server_socket.listen(5)
-        print(f"Server listening on {host}:{port}")
-
-        while True:
-            conn, addr = server_socket.accept()
-            print(f"Connection established with {addr}")
-            handle_client(conn)
-
 def handle_client(conn):
     with conn:
         while True:
@@ -245,6 +228,3 @@ def handle_client(conn):
                     print(f"No matching device found for board_id {board_id}")
             else:
                 print(f"Invalid data size: expected {BTC_SNAP_DATA_SIZE}, got {len(data)}")
-
-if __name__ == "__main__":
-    start_server()

@@ -7,4 +7,4 @@ cd /home/bachana/btc-socket
 source venv/bin/activate
 
 # Run the Python script
-python3 btc-socket.py
+python3 server.py
